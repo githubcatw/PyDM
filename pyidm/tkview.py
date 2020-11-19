@@ -527,7 +527,7 @@ class Combobox(ttk.Combobox):
         widget.selection_clear()
 
         self.selection = widget.get()
-        self.selection_idx = None
+        self.selection_idx = widget.current()
 
         if callable(self.callback):
             self.callback()
@@ -1251,7 +1251,19 @@ class FileProperties(ttk.Frame):
         self.edit_name_popup = None
 
         if button == 'Rename' and name:
-            self.name.set(name.strip())
+            name = name.strip()
+            self.raw_name = name
+
+            # fix tkinter bad arabic language display in linux
+            if config.operating_system == 'Linux':
+                try:
+                    title, extension = os.path.splitext(name)
+
+                    name = arabic_renderer(title)
+                    name += extension
+                except:
+                    pass
+            self.name.set(name)
 
 
 class Thumbnail(tk.Frame):
@@ -1724,9 +1736,10 @@ class PlaylistWindow(tk.Toplevel):
 
         Args:
             main: main window class
-            playlist (iterable): video playlist, in case we have a huge playlist
-            e.g. https://www.youtube.com/watch?v=BZyjT5TkWw4&list=PL2aBZuCeDwlT56jTrxQ3FExn-dtchIwsZ  has 4000 videos
-            will show 40 page each page has 100 video
+            playlist (iterable): video names only in a playlist, e.g. ('1- cats in the wild', '2- car racing', ...)
+                                 in case we have a huge playlist
+                                 e.g. https://www.youtube.com/watch?v=BZyjT5TkWw4&list=PL2aBZuCeDwlT56jTrxQ3FExn-dtchIwsZ
+                                 has 4000 videos, we will show 40 page each page has 100 video
         """
         self.main = main
         self.parent = main.root
@@ -1738,12 +1751,18 @@ class PlaylistWindow(tk.Toplevel):
         self.current_page = 0
         self.items_per_page = min(self.playlist_count, self.max_videos_per_page)
 
-        self.selected_videos = {}  # video_idx vd stream_idx
+        self.selected_videos = {}  # video_idx vs stream_idx
         self.stream_menus = {}  # video_idx vs stream menu
         self.subtitles = {}
         self.selected_subs = {}
 
         self.videos_counter = tk.IntVar()
+
+        self.master_strem_menu = []
+        self.master_combo = None
+        self.master_selection = None  # master combo_box selection
+        self.video_streams = {}  # {'   › mp4': [360, 240, 144], '   › webm': [360, 240, 144]}
+        self.audio_streams = {}  # {'   › aac': [128], '   › ogg': [160], '   › mp3': [128], '   › webm': [160, 70, 50], '   › m4a': [128]}
 
         # initialize super
         tk.Toplevel.__init__(self, self.parent)
@@ -1783,16 +1802,28 @@ class PlaylistWindow(tk.Toplevel):
 
         f2 = tk.Frame(top_frame, bg=MAIN_BG)
         f2.pack(fill='x', expand=True, anchor='w')
-        self.subtitles_label = tk.Label(f2, text='Total subtitles: 0, Selected: 0', bg=MAIN_BG,fg=MAIN_FG)
+        self.subtitles_label = tk.Label(f2, text='Total subtitles: 0, Selected: 0', bg=MAIN_BG, fg=MAIN_FG)
         self.subtitles_label.pack(side='left', padx=5, pady=5)
 
         Button(f2, text='Sub', command=self.show_subtitles_window).pack(side='left', padx=5, pady=5)
 
+        # master menu
+        f3 = tk.Frame(top_frame, bg=MAIN_BG)
+        f3.pack(fill='x', expand=True, anchor='w')
+
+        # select all
+        self.select_all_var = tk.BooleanVar()
+        Checkbutton(f3, text='Select all', variable=self.select_all_var, command=self.toggle_all).pack(side='left', padx=5, pady=5)
+
+        self.master_combo = Combobox(f3, [], width=40, callback=self.master_combo_callback)
+        self.master_combo.pack(side='right', padx=5, pady=5)
+        tk.Label(f3, text='Preferred quality:', bg=MAIN_BG, fg=MAIN_FG).pack(side='right', padx=(20, 5), pady=5)
+
+        # create items widgets
         for idx, name in zip(range(self.items_per_page), self.playlist):
             item = self.create_item(videos_frame, idx, name)
 
             self.items.append(item)
-            # item.pack(fill='x', expand=True, padx=5, pady=5)
             item.grid(padx=5, pady=5, sticky='ew')
 
             atk.scroll_with_mousewheel(item, target=videos_frame, apply_to_children=True)
@@ -1808,36 +1839,84 @@ class PlaylistWindow(tk.Toplevel):
         ttk.Separator(main_frame).pack(side='top', fill='x', expand=True)
         videos_frame.pack(side='bottom', expand=True, fill='both')
 
-    def show_subtitles_window(self):
-        if self.subtitles:
-            sub_window = SubtitleWindow(self.main, self.subtitles, enable_download_button=False,
-                                        enable_select_button=True, block=True, selected_subs=self.selected_subs)
-            self.selected_subs = sub_window.selected_subs
-        else:
-            self.main.msgbox('No Subtitles available for selected videos or no videos selected!')
-
-        self.update_subs_label()
-
-    def hide_all_items(self):
-        for item in self.items:
-            item.grid_remove()
-
-    def update_page_count(self):
-        """update page number e.g. 'Page: 1 of 40'
+    # region item
+    def create_item(self, parent, idx, name):
+        """Create an item,
+        every item has video name label, stream quality combobox, and a progressbar
         """
-        self.page_count_var.set(f'{self.current_page + 1} of {self.total_pages}')
+        item = tk.Frame(parent, bg=MAIN_BG)
+        item.columnconfigure(0, weight=1)
+        item.columnconfigure(1, weight=1)
+        item.idx = idx  # index in self.items
+        item.selected = tk.BooleanVar()
+
+        # checkbutton
+        item.checkbutton = Checkbutton(item, text=name, variable=item.selected, width=60,
+                                       command=lambda: self.video_select_callback(item.idx))
+
+        # progressbar
+        custom_style = 'custom_playlist_bar.Horizontal.TProgressbar'
+        self.s.configure(custom_style, thickness=3, background=PBAR_FG, troughcolor=SF_BG)
+        item.bar = ttk.Progressbar(item, orient='horizontal', mode='indeterminate', style=custom_style)
+
+        # stream menu
+        item.combobox = Combobox(item, [], width=40, callback=lambda: self.stream_select_callback(item.idx))
+
+        item.checkbutton.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
+
+        return item
+
+    def get_item(self, video_idx):
+        """get item widget from self.items
+
+        Return:
+            (tk widget or None)
+        """
+
+        item_idx = self.get_item_idx(video_idx)
+        item = self.items.get(item_idx, None)
+
+        return item
+
+    def get_item_idx(self, video_idx):
+        """calculate item index based on video index
+        e.g. if video_idx = 301 and we have 100 item per page, this video will be number 1 in 3rd page (counting from 0)
+
+        Return:
+            (int or None): item index or None if video is not in current page
+        """
+
+        # check target page of video item
+        target_page = (video_idx // self.items_per_page)
+        if target_page != self.current_page:
+            return None
+
+        item_idx = video_idx - (target_page * self.items_per_page)
+
+        return item_idx
+
+    def get_video_idx(self, item_idx):
+        """calculate video index from item index based on current page
+        e.g. if item_idx = 1 and current page is 3 (counting from 0), and we have 100 item per page, then video_idx= 301
+
+        Return:
+            (int): video index in playlist
+        """
+
+        video_idx = (self.current_page * self.items_per_page) + item_idx
+
+        return video_idx
 
     def refresh_items(self, start_idx):
         # update widgets
-        idx = start_idx
+        video_idx = start_idx
         for item, name in zip(self.items, self.playlist[start_idx:]):
             item.checkbutton['text'] = name
-            selected = idx in self.selected_videos
+            selected = video_idx in self.selected_videos
             item.selected.set(selected)
-            item.idx = idx
 
-            stream_menu = self.stream_menus.get(idx, [])
-            stream_idx = self.selected_videos.get(idx, 1)
+            stream_menu = self.stream_menus.get(video_idx, [])
+            stream_idx = self.selected_videos.get(video_idx, 1)
             item.combobox.config(values=stream_menu)
 
             if stream_menu:
@@ -1854,8 +1933,14 @@ class PlaylistWindow(tk.Toplevel):
 
             item.grid()
 
-            idx += 1
+            video_idx += 1
 
+    def hide_all_items(self):
+        for item in self.items:
+            item.grid_remove()
+    # endregion
+
+    # region page
     def next_page(self):
         if self.current_page + 1 < self.total_pages:
             self.current_page += 1
@@ -1876,69 +1961,91 @@ class PlaylistWindow(tk.Toplevel):
 
             self.refresh_items(start_idx)
 
-    def create_item(self, parent, idx, name):
-        """Create an item,
-        every item has video name label, stream quality combobox, and a progressbar
+    def update_page_count(self):
+        """update page number e.g. 'Page: 1 of 40'
         """
-        item = tk.Frame(parent, bg=MAIN_BG)
-        item.columnconfigure(0, weight=1)
-        item.columnconfigure(1, weight=1)
-        item.idx = idx
-        item.selected = tk.BooleanVar()
+        self.page_count_var.set(f'{self.current_page + 1} of {self.total_pages}')
+    # endregion
 
-        # checkbutton
-        item.checkbutton = Checkbutton(item, text=name, variable=item.selected, width=60,
-                                       command=lambda: self.video_select_callback(item.idx))
-
-        # progressbar
-        custom_style = 'custom_playlist_bar.Horizontal.TProgressbar'
-        self.s.configure(custom_style, thickness=3, background=PBAR_FG, troughcolor=SF_BG)
-        item.bar = ttk.Progressbar(item, orient='horizontal', mode='indeterminate', style=custom_style)
-
-        # stream menu
-        item.combobox = Combobox(item, [], width=40, callback=lambda: self.stream_select_callback(item.idx))
-
-        item.checkbutton.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
-
-        return item
-
-    def get_item(self, video_idx):
-        """return item from self.items"""
-        # calculate item index depend on current page, e.g. if video_idx = 300 and we have 100 item per page, this video
-        # will be number 0 in 5th page
-        item_idx = video_idx - (self.current_page * self.items_per_page)
-
-        return self.items[item_idx]
-
-    def start_progressbar(self, video_idx):
-        item = self.get_item(video_idx)
+    # region progressbar
+    def start_progressbar(self, item_idx):
+        item = self.items[item_idx]
         item.bar.grid(row=1, column=1, padx=5, sticky='ew')
         item.bar.start(10)
 
-    def stop_progressbar(self, video_idx):
-        item = self.get_item(video_idx)
+    def stop_progressbar(self, item_idx):
+        item = self.items[item_idx]
         item.bar.grid_remove()
         item.bar.stop()
+    # endregion
+
+    def toggle_all(self):
+        run_thread(self._toggle_all)
+
+    def _toggle_all(self):
+        """select / unselct all video items in playlist"""
+
+        if self.select_all_var.get():
+            for idx, item in enumerate(self.items):
+                # quit if playlist window closed, or uncheck button
+                if self.main.pl_window is None or not self.select_all_var.get():
+                    break
+
+                if item.selected.get():
+                    continue
+
+                item.checkbutton.invoke()
+
+                # add some time delay to process a video item and load stream menu before process next video
+                menu = self.stream_menus.get(idx, [])
+                # if video process failed, stream menu will contain only the headers (5 items) and no streams
+                # e.g. ['● Video streams:', '', '● Audio streams:', '', '● Extra streams:']
+                if len(menu) <= 5:
+                    time.sleep(0.5)
+        else:
+            for item in self.items:
+                if not item.selected.get():
+                    continue
+
+                item.checkbutton.invoke()
 
     def close(self):
         self.destroy()
         self.main.pl_window = None
 
     def download(self):
+
+        # sort items
+        self.selected_videos = {k: self.selected_videos[k] for k in sorted(self.selected_videos.keys())}
+        # print(self.selected_videos)
         self.main.controller.download_playlist(self.selected_videos, subtitles=self.selected_subs)
 
         self.close()
 
     def update_view(self, video_idx=None, stream_menu=None, stream_idx=None):
-        """update stream menu values"""
-        self.stop_progressbar(video_idx)
-        item = self.get_item(video_idx)
+        """update stream menu values
+
+        example:
+            stream menu = ['● Video streams:                     ', '   › mp4 - 360 - 8.0 MB - id:18 - 25 fps',
+            '   › mp4 - 240 - 4.9 MB - id:133 - 25 fps', '   › mp4 - 144 - 2.2 MB - id:160 - 15 fps',
+            '   › webm - 360 - 4.0 MB - id:243 - 25 fps', '   › webm - 240 - 2.4 MB - id:242 - 25 fps', '
+            › webm - 144 - 1.3 MB - id:278 - 25 fps', '',
+            '● Audio streams:                 ',
+            '   › aac - 128 - 2.6 MB - id:140', '   › ogg - 160 - 3.1 MB - id:251', '   › mp3 - 128 - 2.6 MB - id:140',
+            '   › webm - 160 - 3.1 MB - id:251', '   › m4a - 128 - 2.6 MB - id:140', '   › webm - 70 - 1.4 MB - id:250',
+            '   › webm - 50 - 1.0 MB - id:249', '',
+            '● Extra streams:                 ', '   › mp4 - 360 - 5.1 MB - id:134 - 25 fps']
+
+        """
+        item_idx = self.get_item_idx(video_idx)
+        self.stop_progressbar(item_idx)
+
+        item = self.items[item_idx]
         combobox = item.combobox
         combobox.config(values=stream_menu)
         combobox.current(stream_idx)
-        combobox.selection_clear()
 
-        self.stream_select_callback(video_idx)
+        self.stream_select_callback(item_idx)
         self.stream_menus[video_idx] = stream_menu
 
         # get subtitles
@@ -1946,6 +2053,93 @@ class PlaylistWindow(tk.Toplevel):
         if sub:
             self.update_subtitles(sub)
 
+        # update master stream menu
+        self.update_master_menu(stream_menu)
+
+        # follow master menu selection
+        self.follow_master_selection(item_idx, stream_menu)
+
+    # region master stream menu
+    def master_combo_callback(self):
+        self.master_selection = self.master_combo.selection
+
+        # update widgets
+        for item_idx, item in enumerate(self.items):
+            if item.selected.get():
+                self.follow_master_selection(item_idx)
+
+        # update selected streams
+        for vid_idx in self.selected_videos:
+            menu = self.stream_menus[vid_idx]
+
+            for s_idx, s_name in enumerate(menu):
+                if s_name.startswith(self.master_selection):
+                    self.selected_videos[vid_idx] = s_idx
+                    break
+
+    def follow_master_selection(self, item_idx, stream_menu=None):
+        """update all selected stream menus to match master menu selection"""
+        video_idx = self.get_video_idx(item_idx)
+        stream_menu = stream_menu or self.stream_menus.get(video_idx, None)
+        item = self.items[item_idx]
+
+        if not stream_menu:
+            return
+
+        combobox = item.combobox
+
+        if self.master_selection:
+            try:
+                # update widget combo boxes
+                for s_idx, s_name in enumerate(stream_menu):
+                    if s_name.startswith(self.master_selection):
+                        combobox.current(s_idx)
+                        self.selected_videos[video_idx] = s_idx
+                        break
+
+            except Exception as e:
+                log('follow master selection error:', e)
+
+    def update_master_menu(self, stream_menu):
+        # update master stream menu
+        streams = self.video_streams
+        for name in stream_menu:
+            if "Audio" in name:
+                streams = self.audio_streams
+
+            if streams == self.audio_streams and name == '':
+                break
+
+            if name.startswith('   › '):
+                entry = name.split(' - ')[:2]
+                ext, quality = entry[0], int(entry[1])
+
+                quality_list = streams.setdefault(ext, [])
+                if quality not in quality_list:
+                    quality_list.append(quality)
+
+        def process(streams_dict):
+            for ext, quality_list in streams_dict.items():
+                quality_list = sorted(quality_list, reverse=True)
+                for quality in quality_list:
+                    item = f'{ext} - {quality}'
+                    menu.append(item)
+
+        menu = ['● Video streams:                     ']
+        process(self.video_streams)
+        menu += ['', '● Audio streams:                 ']
+        process(self.audio_streams)
+
+        self.master_strem_menu = menu
+
+        self.master_combo.config(values=list(self.master_strem_menu))
+
+        # set selection
+        if not self.master_selection and len(self.master_strem_menu) >= 2:
+            self.master_combo.current(1)
+    # endregion
+
+    # region subtitles
     def update_subtitles(self, sub):
         """update available subtitles, it is a sum of all subtitles for all selected videos in playlist"""
 
@@ -1954,34 +2148,50 @@ class PlaylistWindow(tk.Toplevel):
             # merge 2 lists, don't use set() to avoid losing order
             self.subtitles[lang] = ext_list + [x for x in new_ext_list if x not in ext_list]
 
-    def stream_select_callback(self, video_idx):
-        item = self.get_item(video_idx)
+    def show_subtitles_window(self):
+        if self.subtitles:
+            sub_window = SubtitleWindow(self.main, self.subtitles, enable_download_button=False,
+                                        enable_select_button=True, block=True, selected_subs=self.selected_subs)
+            self.selected_subs = sub_window.selected_subs
+        else:
+            self.main.msgbox('No Subtitles available for selected videos or no videos selected!')
+
+        self.update_subs_label()
+
+    def update_subs_label(self):
+        self.subtitles_label['text'] = f'Total subtitles: {len(self.subtitles)}, Selected: {len(self.selected_subs)}'
+    # endregion
+
+    def video_select_callback(self, item_idx):
+        """ask controller to send stream menu when selecting a video"""
+        item = self.items[item_idx]
+        video_idx = self.get_video_idx(item_idx)
+
+        if item.selected.get():
+            item.combobox.grid(row=0, column=1, padx=5, sticky='ew')
+            self.start_progressbar(item_idx)
+            self.main.controller.select_playlist_video(video_idx, active=False)
+
+            self.videos_counter.set(self.videos_counter.get() + 1)
+        else:
+            self.videos_counter.set(self.videos_counter.get() - 1)
+            item.combobox.grid_remove()
+            self.stop_progressbar(item_idx)
+
+        self.update_subs_label()
+
+        self.stream_select_callback(item_idx)
+
+    def stream_select_callback(self, item_idx):
+        item = self.items[item_idx]
+        video_idx = self.get_video_idx(item_idx)
+
         stream_idx = item.combobox.current()
 
         if item.selected.get():
             self.selected_videos[video_idx] = stream_idx
         elif video_idx in self.selected_videos:
             self.selected_videos.pop(video_idx)
-
-    def update_subs_label(self):
-        self.subtitles_label['text'] = f'Total subtitles: {len(self.subtitles)}, Selected: {len(self.selected_subs)}'
-
-    def video_select_callback(self, video_idx):
-        """ask controller to send stream menu when selecting a video"""
-        item = self.get_item(video_idx)
-
-        if item.selected.get():
-            item.combobox.grid(row=0, column=1, padx=5, sticky='ew')
-            self.start_progressbar(video_idx)
-            self.main.controller.select_playlist_video(video_idx, active=False)
-
-            self.videos_counter.set(self.videos_counter.get() + 1)
-        else:
-            self.videos_counter.set(self.videos_counter.get() - 1)
-
-        self.update_subs_label()
-
-        self.stream_select_callback(video_idx)
 
 
 class SubtitleWindow(tk.Toplevel):
@@ -2159,7 +2369,8 @@ class AudioWindow(tk.Toplevel):
         self.selection_var.set(self.selected_idx)
 
         for idx, audio in enumerate(self.audio_menu):
-            item = atk.Radiobutton(middle_frame, text=audio, variable=self.selection_var, value=idx)
+            # value should be string to fix tkinter error when value is 0
+            item = atk.button.Radiobutton(middle_frame, text=audio, variable=self.selection_var, value=f'{idx}')
             item.pack(padx=5, pady=5, anchor='w')
 
             atk.scroll_with_mousewheel(item, target=middle_frame, apply_to_children=True)
@@ -2177,12 +2388,11 @@ class AudioWindow(tk.Toplevel):
 
     def close(self):
         self.destroy()
-        self.main.subtitles_window = None
 
     def select_audio(self):
         idx = self.selection_var.get()
         if idx is not None:
-            self.main.controller.select_audio(idx)
+            self.main.controller.select_audio(int(idx))
 
         self.close()
 
@@ -2490,7 +2700,7 @@ class MainWindow(IView):
         self.sett_frame = self.create_settings_tab()
 
         # downloads tab
-        self.d_tab = self.create_downloads_tab()
+        self.downloads_frame = self.create_downloads_tab()
 
         # log tab
         self.log_tab = self.create_log_tab()
@@ -2499,9 +2709,8 @@ class MainWindow(IView):
         self.side_frame = SideFrame(parent=self.main_frame)
 
         # create side frame buttons
-        img_folder = 'D:\\python/myProgects/PyIDM/design/ui/'
         self.side_frame.create_button('Home', b64=home_icon, target=self.home_tab)
-        self.side_frame.create_button('Downloads', b64=download_icon, target=self.d_tab)
+        self.side_frame.create_button('Downloads', b64=download_icon, target=self.downloads_frame)
         self.side_frame.create_button('Settings', b64=sett_icon, target=self.sett_frame)
         self.side_frame.create_button('Log', b64=log_icon, target=self.log_tab)
 
@@ -2575,8 +2784,25 @@ class MainWindow(IView):
         return home_tab
 
     def create_downloads_tab(self):
-        tab = atk.ScrollableFrame(self.main_frame, bg=MAIN_BG, vscroll=True, hscroll=False, autoscroll=True,
-                                  sbar_fg=SBAR_FG, sbar_bg=SBAR_BG)
+        tab = tk.Frame(self.main_frame, background=MAIN_BG)
+
+        # buttons frame
+        top_fr = tk.Frame(tab, bg=HDG_BG)
+        top_fr.pack(fill='x', pady=5, padx=(5, 0))
+
+        btn_fr = tk.Frame(top_fr, bg=MAIN_BG)
+        btn_fr.pack(fill='x', pady=5, padx=5)
+
+        tk.Label(btn_fr, text='Downloads:', bg=MAIN_BG, fg=MAIN_FG, anchor='w',
+                 font='any 10 bold').pack(anchor='w', side='left', padx=5)
+
+        Button(btn_fr, text='STOP ALL', command=self.stop_all).pack(side='right', padx=5, pady=3)
+        Button(btn_fr, text='RESUME ALL', command=self.resume_all).pack(side='right', padx=5, pady=3)
+
+        # Scrollable
+        self.d_tab = atk.ScrollableFrame(tab, bg=MAIN_BG, vscroll=True, hscroll=False,
+                                         autoscroll=config.autoscroll_download_tab, sbar_fg=SBAR_FG, sbar_bg=SBAR_BG)
+        self.d_tab.pack(expand=True, fill='both')
 
         return tab
 
@@ -2621,6 +2847,10 @@ class MainWindow(IView):
         # CheckOption(tab, 'Show download window', key='show_download_window').pack(anchor='w')
         # CheckOption(tab, 'Auto close download window after finish downloading', key='auto_close_download_window').pack(anchor='w')
         CheckOption(tab, 'Show "MD5 and SHA256" checksums for downloaded files in log', key='checksum').pack(anchor='w')
+        CheckOption(tab, 'Autoscroll downloads tab to bottom when adding new item "requires application restart"',
+                    key='autoscroll_download_tab').pack(anchor='w')
+        CheckOption(tab, 'Show confirm dialog when press "RESUME ALL" button', key='confirm_on_resume_all').pack(anchor='w')
+        CheckOption(tab, 'Show confirm dialog when press "STOP ALL" button', key='confirm_on_stop_all').pack(anchor='w')
 
         sett_folder_frame = tk.Frame(tab, bg=bg)
         sett_folder_frame.pack(anchor='w', expand=True, fill='x')
@@ -2633,24 +2863,11 @@ class MainWindow(IView):
         # Video / Audio ------------------------------------------------------------------------------------------------
         heading('Video / Audio:')
 
-        # video extractor backend -------------------------
-        def select_extractor(extractor):
-            self.controller.set_video_backend(extractor)
-            self.update_youtube_dl_info()
-
-        f = tk.Frame(tab, bg=bg)
-        f.pack(anchor='w', expand=True, fill='x')
-
-        tk.Label(f, bg=bg, fg=fg, text='Video extractor backend:  ').pack(side='left')
-
-        self.extractors_menu = Combobox(f, values=config.video_extractors_list, selection=config.active_video_extractor)
-        self.extractors_menu.callback = lambda: select_extractor(self.extractors_menu.selection)
-        self.extractors_menu.pack(side='left', ipadx=5)
-
         CheckOption(tab, 'Write metadata to media files', key='write_metadata').pack(anchor='w')
         CheckOption(tab, 'Manually select audio format for dash videos', key='manually_select_dash_audio').pack(
             anchor='w')
         CheckOption(tab, 'Download Video Thumbnail', key='download_thumbnail').pack(anchor='w')
+        CheckOption(tab, 'Enable CAPTCHA! workaround', key='enable_captcha_workaround').pack(anchor='w')
 
         separator()
 
@@ -2683,7 +2900,7 @@ class MainWindow(IView):
         self.proxy_type_var.set(get_option('proxy_type', 'http'))
 
         def proxy_type_option(text):
-            atk.Radiobutton(proxy_frame, text=text, value=text, variable=self.proxy_type_var, bg=bg,
+            atk.button.Radiobutton(proxy_frame, text=text, value=text, variable=self.proxy_type_var, bg=bg,
                             fg=fg).pack( side='left', padx=2)
 
         proxy_type_option('http')
@@ -2740,7 +2957,7 @@ class MainWindow(IView):
 
         separator()
 
-        # advanced -----------------------------------------------------------------------------------------------------
+        # Debugging -----------------------------------------------------------------------------------------------------
         heading('Debugging:')
         CheckOption(tab, 'keep temp files / folders after done downloading for debugging.', key='keep_temp').pack(anchor='w')
         CheckOption(tab, 'Re-raise all caught exceptions / errors for debugging "Application will crash on any Error"', key='TEST_MODE').pack(anchor='w')
@@ -2766,13 +2983,24 @@ class MainWindow(IView):
         self.pyidm_update_note.set(f'PyIDM version: {config.APP_VERSION}')
         lbl(self.pyidm_update_note).grid(row=1, column=1, columnspan=2, sticky='w')
 
-        # youtube-dl update
+        # youtube-dl and youtube-dlc update
         Button(update_frame, image=self.refresh_img, command=self.check_for_ytdl_update).grid(row=2, column=0, sticky='e', pady=5, padx=(20, 5))
         self.youtube_dl_update_note = tk.StringVar()
         self.youtube_dl_update_note.set(f'{config.active_video_extractor} version: {config.ytdl_VERSION}')
         lbl(self.youtube_dl_update_note).grid(row=2, column=1, columnspan=2, sticky='w')
 
         Button(update_frame, text='Rollback update', command=self.rollback_ytdl_update).grid(row=2, column=3, sticky='w', pady=5, padx=(20, 5))
+
+        # video extractor backend -------------------------
+        def select_extractor(extractor):
+            self.controller.set_video_backend(extractor)
+            self.update_youtube_dl_info()
+
+        tk.Label(update_frame, bg=bg, fg=fg, text='Switch extractor:  ').grid(row=2, column=4, sticky='w', padx=(50, 5))
+
+        self.extractors_menu = Combobox(update_frame, values=config.video_extractors_list, selection=config.active_video_extractor)
+        self.extractors_menu.callback = lambda: select_extractor(self.extractors_menu.selection)
+        self.extractors_menu.grid(row=2, column=5, sticky='w')
 
         if not config.disable_update_feature:
             heading('Update:')
@@ -2944,6 +3172,15 @@ class MainWindow(IView):
         # download
         self.download(name=self.file_properties.name.get(), folder=self.file_properties.folder.get())
 
+    def download(self, uid=None, **kwargs):
+        """Send command to controller to download an item
+
+        Args:
+            uid (str): download item's unique identifier, if omitted active item will be downloaded
+            kwargs: key/value for any legit attributes in DownloadItem
+        """
+        self.controller.download(uid, **kwargs)
+
     def resume_download(self, uid):
         """start / resume download for a download item
 
@@ -2953,22 +3190,31 @@ class MainWindow(IView):
 
         self.download(uid)
 
-    def stop_all(self):
-        """stop all downloads"""
-        for uid in self.d_items:
-            self.stop_download(uid)
+    def resume_all(self):
+        """resume downloading all non completed items in downloads tab"""
+
+        if config.confirm_on_resume_all:
+            res = self.popup('Resume all non-completed downloads?', buttons=['Yes', 'No'])
+            if res != 'Yes':
+                return
+
+        for uid, item in self.d_items.items():
+            if item.status.get() in (config.Status.cancelled, config.Status.error):
+                self.resume_download(uid)
 
     def stop_download(self, uid):
         self.controller.stop_download(uid)
 
-    def download(self, uid=None, **kwargs):
-        """Send command to controller to download an item
+    def stop_all(self):
+        """stop all downloads"""
 
-        Args:
-            uid (str): download item's unique identifier, if omitted active item will be downloaded
-            kwargs: key/value for any legit attributes in DownloadItem
-        """
-        self.controller.download(uid, **kwargs)
+        if config.confirm_on_stop_all:
+            res = self.popup('Stop all active downloads?', buttons=['Yes', 'No'])
+            if res != 'Yes':
+                return
+
+        for uid in self.d_items:
+            self.stop_download(uid)
 
     def delete_completed(self):
         """delete completed items"""
@@ -3221,6 +3467,7 @@ class MainWindow(IView):
             self.youtube_dl_update_note.set(
                 f'{config.active_video_extractor} version: {config.ytdl_VERSION}')
         else:
+            self.youtube_dl_update_note.set(f'{config.active_video_extractor} version: Loading ... ')
             self.root.after(1000, self.update_youtube_dl_info)
 
     def check_for_ytdl_update(self):
@@ -3348,6 +3595,23 @@ class MainWindow(IView):
             return
 
         self.pl_window = PlaylistWindow(self, pl)
+
+    def get_offline_webpage_path(self):
+        """get the file path of the offline webpage contents as a workaround for captcha
+        """
+
+        msg = 'Found Captcha when downloading webpage contents, you should open this link in your browser' \
+              ' and  save webpage manually on the disk (as htm or html), then press below "select file" button to ' \
+              'select your saved webpage file'
+        fp = None
+
+        btn = self.popup(msg, buttons=['Select file', 'Cancel'], title='Captcha found')
+
+        if btn == 'Select file':
+            fp = filedialog.askopenfilename()
+
+        return fp
+
     # endregion
 
     # region url, clipboard

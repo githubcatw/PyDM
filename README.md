@@ -5,9 +5,9 @@
 ![GitHub issues](https://img.shields.io/github/issues-raw/pyidm/pyidm?color=blue) - ![GitHub closed issues](https://img.shields.io/github/issues-closed-raw/pyidm/pyidm?color=blue)
 
 
-PyDM *(Python Download Manager)* is an open source download manager written in Python,
-with multi-connections and a high speed engine.
-It downloads general files as well as videos from YouTube and tons of other streaming websites . <br>
+PyIDM is a python open source (Internet Download Manager) 
+with multi-connections, high speed engine, 
+it downloads general files and videos from youtube and tons of other streaming websites . <br>
 Developed in Python, based on "LibCurl", and "youtube_dl".
 
 ![screenshot](https://user-images.githubusercontent.com/58998813/92564079-e4fcee00-f278-11ea-83e1-9a272bc06b0f.png)
@@ -40,25 +40,27 @@ Developed in Python, based on "LibCurl", and "youtube_dl".
     - Max. connections per download.
 
 ---
-# How to use PyDM:
+# How to use PyIDM:
 Refer to user guide at https://github.com/pyIDM/PyIDM/blob/master/docs/user_guide.md
 
 ----------------------
-# How to install PyDM?
+# How to install PyIDM?
 You have 3 options to run PyIDM on your operating system:
 
-1. **Windows portable version**:<br>
-Latest Windows portable version available [here](https://github.com/pyIDM/PyIDM/releases/latest). <br>
-unzip, and run from PyIDM.exe, no installation required.
+1. **Windows portable version**:  
+   Latest Windows portable version available
+   [here](https://github.com/pyIDM/PyIDM/releases/latest).  
+   unzip, and run from PyIDM.exe, no installation required.
 
 2. **PyPi**:<br>
     `python -m pip install pyidm --upgrade --no-cache`
     
-    then you can run application from Terminal by:<br>
-    `python -m pyidm`          note pyidm name in small letters 
+    then you can run application from Terminal by:  
+    `python -m pyidm`          note pyidm name in small letters
 
-    or just<br> `pyidm` an executable "i.e. pyidm.exe on windows" will
-    be located at "python/scripts", if it doesn't work append
+    or just  
+    `pyidm` an executable "i.e. pyidm.exe on windows" will be
+    located at "python/scripts", if it doesn't work append
     "python/scripts" folder to PATH.
 
 
@@ -67,36 +69,38 @@ PyIDM is a python app. so, it can run on any platform that can run python,
 To run from source, you have to have a python installed, "supported python versions is 3.6, 3.7, and 3.8", then download or clone this repository, and run PyIDM.py (it will install the other required python packages automatically if missing)
 if PyIDM failed to install required packages, you should install it manually, refer to "Dependencies" section below.
 
-4. **Build PyDM yourself**:
+4. **Build PyIDM yourself**:
    -  get the source code from github: (recommended for latest updated
-      version)
+      version, also shallow clone is preferred)  
+      `git clone --depth 1 https://github.com/pyIDM/PyIDM.git`
 
-   `git clone https://github.com/pyIDM/PyIDM.git` <br>
+   - or get the source code from PyPi:  
+   navigate to https://pypi.org/project/pyIDM/#files and download a tar
+   ball, example file name "pyIDM-2020.3.22.tar.gz", then extract it
 
-    - or get the source code from PyPi: <br>
-        navigate to https://pypi.org/project/pyIDM/#files and download a tar ball, example file name "pyIDM-2020.3.22.tar.gz", then extract it
-
-    - open your terminal or command prompt and navigate to pyidm folder then type below command <br>
+   - open your terminal or command prompt and navigate to pyidm folder then type below command  
         `python setup.py install`
 
-    - run PyDM from Terminal by typing:<br>
+   - run PyIDM from Terminal by typing:  
         `python -m pyidm`     or  just `pyidm`
 
 5. **Examples:**
 
     -**Linux ubuntu:**
 
-    download source:
-    `git clone https://github.com/pyIDM/PyIDM.git`
+    download source (shallow clone is preferred):  
+    `git clone --depth 1 https://github.com/pyIDM/PyIDM.git`
 
-    install dependencies:
-    `sudo apt install ffmpeg fonts-symbola libcurl4-openssl-dev
-    libssl-dev python3-pip python3-pil python3-pil.imagetk python3-tk`
+    install dependencies:  
+    ```
+    sudo apt install ffmpeg fonts-symbola libcurl4-openssl-dev
+    libssl-dev python3-pip python3-pil python3-pil.imagetk python3-tk
+    ```
 
-    install PyDM:
+    install PyIDM:
     `python3 setup.py install --user`
 
-    run PyDM: `python3 -m pyidm`
+    run PyIDM: `python3 -m pyidm`
 
 
 **important note on Tkinter for mac users**:<br>
@@ -121,14 +125,14 @@ Required python packages:
 ** please read notes below
 
 
-PyDM will do its best to install missing packages automatically once you run it. or you can install required packages manually using:
+PyIDM application will do its best to install missing packages automatically once you run it. or you can install required packages manually using:
 
 ```
 pip install -r requirements.txt
 ```
 or
 ```
-python -m pip install --user --upgrade certifi plyer youtube_dl pycurl pillow pystray
+python -m pip install --user --upgrade certifi plyer youtube_dl pycurl pillow pystray awesometkinter
 ```
 
 
